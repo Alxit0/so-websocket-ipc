@@ -20,10 +20,13 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>    // <-- ADICIONADO para threads
+#include <semaphore.h>  // <-- ADICIONADO para semáforos
 
 #define BACKLOG 128
 #define BUF_SIZE 8192
 #define MAX_PATH 4096
+#define THREADS_PER_WORKER 10  // <-- ADICIONADO para thread pool
 
 // ============================================================================
 // Configuration Structure (based on template)
@@ -43,6 +46,17 @@ typedef struct {
     char path[512];
     char version[16];
 } http_request_t;
+
+// ============================================================================
+// Statistics Structure (NEW - para estatísticas compartilhadas)
+// ============================================================================
+typedef struct {
+    int total_requests;
+    int bytes_sent;
+    sem_t semaphore;  // Semáforo para proteção
+} server_stats_t;
+
+server_stats_t global_stats;  // Variável global para estatísticas
 
 static volatile sig_atomic_t keep_running = 1;
 
@@ -114,6 +128,24 @@ void log_message(const char* format, ...) {
     va_end(args);
     
     fprintf(stderr, "\n");
+}
+
+// ============================================================================
+// Update Statistics Function (NEW - para estatísticas com semáforo)
+// ============================================================================
+void update_stats(int bytes) {
+    sem_wait(&global_stats.semaphore);  // Proteger com semáforo
+    
+    global_stats.total_requests++;
+    global_stats.bytes_sent += bytes;
+    
+    // Mostrar estatísticas a cada 15 pedidos
+    if (global_stats.total_requests % 15 == 0) {
+        log_message("STATS: Requests=%d, Bytes=%d", 
+                   global_stats.total_requests, global_stats.bytes_sent);
+    }
+    
+    sem_post(&global_stats.semaphore);  // Liberar semáforo
 }
 
 // ============================================================================
@@ -195,6 +227,7 @@ void send_file_response(int client_fd, const char* full_path, const char* method
     if (!file) {
         const char* body = "<h1>404 Not Found</h1>";
         send_http_response(client_fd, 404, "Not Found", "text/html", body, strlen(body));
+        update_stats(strlen(body));  // Atualizar estatísticas para erro 404
         return;
     }
 
@@ -205,6 +238,7 @@ void send_file_response(int client_fd, const char* full_path, const char* method
         fclose(file);
         const char* body = "<h1>500 Internal Server Error</h1>";
         send_http_response(client_fd, 500, "Internal Server Error", "text/html", body, strlen(body));
+        update_stats(strlen(body));  // Atualizar estatísticas para erro 500
         return;
     }
 
@@ -213,6 +247,7 @@ void send_file_response(int client_fd, const char* full_path, const char* method
         fclose(file);
         const char* body = "<h1>403 Forbidden</h1>";
         send_http_response(client_fd, 403, "Forbidden", "text/html", body, strlen(body));
+        update_stats(strlen(body));  // Atualizar estatísticas para erro 403
         return;
     }
 
@@ -244,6 +279,7 @@ void send_file_response(int client_fd, const char* full_path, const char* method
     }
 
     fclose(file);
+    update_stats(file_size);  // Atualizar estatísticas para sucesso
 }
 
 // ============================================================================
@@ -265,6 +301,7 @@ void handle_client_connection(int client_fd, const server_config_t* config) {
     if (parse_http_request(buffer, &req) < 0) {
         const char* body = "<h1>400 Bad Request</h1>";
         send_http_response(client_fd, 400, "Bad Request", "text/html", body, strlen(body));
+        update_stats(strlen(body));
         close(client_fd);
         return;
     }
@@ -273,6 +310,7 @@ void handle_client_connection(int client_fd, const server_config_t* config) {
     if (strcmp(req.method, "GET") != 0 && strcmp(req.method, "HEAD") != 0) {
         const char* body = "<h1>501 Not Implemented</h1>";
         send_http_response(client_fd, 501, "Not Implemented", "text/html", body, strlen(body));
+        update_stats(strlen(body));
         close(client_fd);
         return;
     }
@@ -290,6 +328,7 @@ void handle_client_connection(int client_fd, const server_config_t* config) {
         if (strstr(req.path, "..")) {
             const char* body = "<h1>403 Forbidden</h1>";
             send_http_response(client_fd, 403, "Forbidden", "text/html", body, strlen(body));
+            update_stats(strlen(body));
             close(client_fd);
             return;
         }
@@ -386,6 +425,11 @@ int main(int argc, char** argv) {
     server_config_t config;
     load_config(config_file, &config);
 
+    // Initialize statistics with semaphore (NEW)
+    global_stats.total_requests = 0;
+    global_stats.bytes_sent = 0;
+    sem_init(&global_stats.semaphore, 0, 1);
+
     // Setup signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -428,6 +472,19 @@ int main(int argc, char** argv) {
     while (keep_running) {
         sleep(1);
         
+        // Show global statistics every 30 seconds (NEW)
+        static int counter = 0;
+        counter++;
+        if (counter >= 30) {
+            counter = 0;
+            sem_wait(&global_stats.semaphore);
+            log_message("=== GLOBAL STATISTICS ===");
+            log_message("Total requests: %d", global_stats.total_requests);
+            log_message("Total bytes sent: %d", global_stats.bytes_sent);
+            log_message("=========================");
+            sem_post(&global_stats.semaphore);
+        }
+        
         // Reap any dead children
         int status;
         pid_t pid;
@@ -454,6 +511,13 @@ int main(int argc, char** argv) {
     close(server_fd);
     free(worker_pids);
     
+    // Cleanup semaphore (NEW)
+    sem_destroy(&global_stats.semaphore);
+    
     log_message("Shutdown complete");
     return EXIT_SUCCESS;
+    
+// Este servidor implementa arquitetura multi-process (master-worker)
+// mas ainda não implementa thread pool completo. Cada worker processa
+// conexões na thread principal.
 }
