@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
@@ -88,7 +89,7 @@ void send_file_response(int client_fd, const char* full_path, const char* method
     if (!file) {
         const char* body = "<h1>404 Not Found</h1>";
         send_http_response(client_fd, 404, "Not Found", "text/html", body, strlen(body));
-        update_stats(strlen(body));  // Atualizar estatísticas para erro 404
+        update_stats_with_code(strlen(body), 404);
         return;
     }
 
@@ -99,7 +100,7 @@ void send_file_response(int client_fd, const char* full_path, const char* method
         fclose(file);
         const char* body = "<h1>500 Internal Server Error</h1>";
         send_http_response(client_fd, 500, "Internal Server Error", "text/html", body, strlen(body));
-        update_stats(strlen(body));  // Atualizar estatísticas para erro 500
+        update_stats_with_code(strlen(body), 500);
         return;
     }
 
@@ -108,7 +109,7 @@ void send_file_response(int client_fd, const char* full_path, const char* method
         fclose(file);
         const char* body = "<h1>403 Forbidden</h1>";
         send_http_response(client_fd, 403, "Forbidden", "text/html", body, strlen(body));
-        update_stats(strlen(body));  // Atualizar estatísticas para erro 403
+        update_stats_with_code(strlen(body), 500);
         return;
     }
 
@@ -140,18 +141,24 @@ void send_file_response(int client_fd, const char* full_path, const char* method
     }
 
     fclose(file);
-    update_stats(file_size);  // Atualizar estatísticas para sucesso
+    update_stats_with_code(file_size, 200);
 }
 
 // ============================================================================
 // Handle Client Connection
 // ============================================================================
 void handle_client_connection(int client_fd, const server_config_t* config) {
+    increment_active_connections();
+    
+    struct timespec start_time, end_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    
     char buffer[BUF_SIZE];
     ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
     
     if (bytes_read <= 0) {
         close(client_fd);
+        decrement_active_connections();
         return;
     }
     
@@ -162,7 +169,7 @@ void handle_client_connection(int client_fd, const server_config_t* config) {
     if (parse_http_request(buffer, &req) < 0) {
         const char* body = "<h1>400 Bad Request</h1>";
         send_http_response(client_fd, 400, "Bad Request", "text/html", body, strlen(body));
-        update_stats(strlen(body));
+        update_stats_with_code(strlen(body), 500);
         close(client_fd);
         return;
     }
@@ -171,7 +178,7 @@ void handle_client_connection(int client_fd, const server_config_t* config) {
     if (strcmp(req.method, "GET") != 0 && strcmp(req.method, "HEAD") != 0) {
         const char* body = "<h1>501 Not Implemented</h1>";
         send_http_response(client_fd, 501, "Not Implemented", "text/html", body, strlen(body));
-        update_stats(strlen(body));
+        update_stats_with_code(strlen(body), 500);
         close(client_fd);
         return;
     }
@@ -189,7 +196,7 @@ void handle_client_connection(int client_fd, const server_config_t* config) {
         if (strstr(req.path, "..")) {
             const char* body = "<h1>403 Forbidden</h1>";
             send_http_response(client_fd, 403, "Forbidden", "text/html", body, strlen(body));
-            update_stats(strlen(body));
+            update_stats_with_code(strlen(body), 500);
             close(client_fd);
             return;
         }
@@ -206,4 +213,12 @@ void handle_client_connection(int client_fd, const server_config_t* config) {
     send_file_response(client_fd, full_path, req.method);
 
     close(client_fd);
+    
+    // Calculate and record response time
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    long long response_time_ms = (end_time.tv_sec - start_time.tv_sec) * 1000LL +
+                                  (end_time.tv_nsec - start_time.tv_nsec) / 1000000LL;
+    add_response_time(response_time_ms);
+    
+    decrement_active_connections();
 }
