@@ -2,31 +2,24 @@
 #define THREAD_POOL_H
 
 #include <pthread.h>
+#include "connection_queue.h"
 
 // ============================================================================
 // Thread Pool Structures
 // ============================================================================
-typedef struct work_item {
-    int client_fd;
-    struct work_item* next;
-} work_item_t;
-
 typedef struct {
-    work_item_t* head;
-    work_item_t* tail;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    int shutdown;
+    connection_queue_t* queue;  // Connection queue with semaphores
     int active_threads;
-} work_queue_t;
+    pthread_mutex_t active_mutex;  // Mutex for active_threads counter
+} thread_pool_t;
 
 // ============================================================================
-// Work Queue Functions
+// Thread Pool Functions
 // ============================================================================
-void work_queue_init(work_queue_t* queue);
-void work_queue_push(work_queue_t* queue, int client_fd);
-int work_queue_pop(work_queue_t* queue);
-void work_queue_shutdown(work_queue_t* queue);
-void work_queue_destroy(work_queue_t* queue);
+void thread_pool_init(thread_pool_t* pool, connection_queue_t* queue);
+void thread_pool_destroy(thread_pool_t* pool);
+int thread_pool_get_active_threads(thread_pool_t* pool);
+void thread_pool_increment_active(thread_pool_t* pool);
+void thread_pool_decrement_active(thread_pool_t* pool);
 
 #endif // THREAD_POOL_H

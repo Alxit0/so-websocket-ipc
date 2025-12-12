@@ -6,6 +6,7 @@
 #include "http.h"
 #include "logger.h"
 #include "thread_pool.h"
+#include "connection_queue.h"
 #include "file_cache.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,7 +64,7 @@ int create_server_socket(int port) {
 // Thread Pool Worker Context
 // ============================================================================
 typedef struct {
-    work_queue_t* queue;
+    thread_pool_t* pool;
     int worker_id;
     int thread_id;
     const server_config_t* config;
@@ -79,12 +80,11 @@ void* thread_worker(void* arg) {
     log_message("Worker %d: Thread %d started (TID: %lu)", 
                ctx->worker_id, ctx->thread_id, (unsigned long)pthread_self());
     
-    pthread_mutex_lock(&ctx->queue->mutex);
-    ctx->queue->active_threads++;
-    pthread_mutex_unlock(&ctx->queue->mutex);
+    thread_pool_increment_active(ctx->pool);
     
     while (1) {
-        int client_fd = work_queue_pop(ctx->queue);
+        // Consumer: dequeue connection from bounded queue
+        int client_fd = connection_queue_dequeue(ctx->pool->queue);
         
         if (client_fd < 0) {
             // Shutdown signal
@@ -102,9 +102,7 @@ void* thread_worker(void* arg) {
         handle_client_connection(client_fd, ctx->config, ctx->cache);
     }
     
-    pthread_mutex_lock(&ctx->queue->mutex);
-    ctx->queue->active_threads--;
-    pthread_mutex_unlock(&ctx->queue->mutex);
+    thread_pool_decrement_active(ctx->pool);
     
     log_message("Worker %d: Thread %d exiting", ctx->worker_id, ctx->thread_id);
     free(ctx);
@@ -117,6 +115,24 @@ void* thread_worker(void* arg) {
 void worker_signal_handler(int signum) {
     (void)signum;
     keep_running = 0;
+}
+
+// ============================================================================
+// Send 503 Service Unavailable Response
+// ============================================================================
+void send_503_response(int client_fd) {
+    const char* response = 
+        "HTTP/1.1 503 Service Unavailable\r\n"
+        "Content-Type: text/html\r\n"
+        "Connection: close\r\n"
+        "Retry-After: 1\r\n"
+        "\r\n"
+        "<html><body><h1>503 Service Unavailable</h1>"
+        "<p>Server is overloaded. Please try again later.</p>"
+        "</body></html>";
+    update_stats_with_code(strlen(response), 503);
+    send(client_fd, response, strlen(response), 0);
+    close(client_fd);
 }
 
 // ============================================================================
@@ -145,21 +161,30 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
         log_message("Worker %d: File caching disabled (CACHE_SIZE_MB=0)", worker_id);
     }
 
-    // Inicializar fila de trabalho
-    work_queue_t queue;
-    work_queue_init(&queue);
+    // Initialize connection queue (bounded circular buffer with semaphores)
+    connection_queue_t conn_queue;
+    if (connection_queue_init(&conn_queue) != 0) {
+        log_message("Worker %d: Failed to initialize connection queue", worker_id);
+        if (cache_ptr) file_cache_destroy(cache_ptr);
+        return;
+    }
     
-    // Criar thread pool
+    // Initialize thread pool
+    thread_pool_t pool;
+    thread_pool_init(&pool, &conn_queue);
+    
+    // Create worker threads
     pthread_t* threads = malloc(sizeof(pthread_t) * config->threads_per_worker);
     if (!threads) {
         log_message("Worker %d: Failed to allocate thread array", worker_id);
+        connection_queue_destroy(&conn_queue);
         if (cache_ptr) file_cache_destroy(cache_ptr);
         return;
     }
     
     for (int i = 0; i < config->threads_per_worker; i++) {
         thread_context_t* ctx = malloc(sizeof(thread_context_t));
-        ctx->queue = &queue;
+        ctx->pool = &pool;
         ctx->worker_id = worker_id;
         ctx->thread_id = i;
         ctx->config = config;
@@ -171,9 +196,13 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
         }
     }
     
-    log_message("Worker %d: Thread pool initialized", worker_id);
+    log_message("Worker %d: Thread pool initialized with bounded queue (size: %d)", 
+                worker_id, QUEUE_SIZE);
 
-    // Loop principal: aceitar conexões e distribuir para threads
+    // Producer: Accept connections and enqueue them
+    unsigned long total_accepted = 0;
+    unsigned long total_rejected = 0;
+    
     while (keep_running) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
@@ -186,21 +215,36 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
             continue;
         }
 
-        // Adicionar trabalho à fila (threads vão processar)
-        work_queue_push(&queue, client_fd);
+        total_accepted++;
+        
+        // Try to enqueue connection (non-blocking)
+        if (connection_queue_try_enqueue(&conn_queue, client_fd) != 0) {
+            // Queue is full - reject with 503
+            total_rejected++;
+            send_503_response(client_fd);
+            
+            // Log every 100 rejections to avoid log spam
+            if (total_rejected % 100 == 1) {
+                log_message("Worker %d: Queue full, rejected %lu connections so far", 
+                           worker_id, total_rejected);
+            }
+        }
     }
 
-    // Shutdown gracioso do thread pool
-    log_message("Worker %d: Initiating graceful shutdown", worker_id);
-    work_queue_shutdown(&queue);
+    // Shutdown gracioso
+    log_message("Worker %d: Initiating graceful shutdown (accepted: %lu, rejected: %lu)", 
+                worker_id, total_accepted, total_rejected);
     
-    // Aguardar todas as threads terminarem
+    connection_queue_shutdown(&conn_queue);
+    
+    // Wait for all threads to finish
     for (int i = 0; i < config->threads_per_worker; i++) {
         pthread_join(threads[i], NULL);
     }
     
     free(threads);
-    work_queue_destroy(&queue);
+    thread_pool_destroy(&pool);
+    connection_queue_destroy(&conn_queue);
     
     // Print cache statistics before destroying (if cache was enabled)
     if (cache_ptr) {
