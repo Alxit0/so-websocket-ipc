@@ -1,0 +1,24 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+bin/
+obj/
+*.o
+*.a
+*.so
+
+# Documentation and temp files
+docs/
+temp/
+TODO_temp.md
+*.md
+!README.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
