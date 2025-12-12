@@ -22,6 +22,10 @@ typedef struct {
     long long total_response_time_ms;  // soma total em milissegundos
     int response_count;                 // contador para calcular média
     
+    // Last metrics snapshot (for /metrics endpoint)
+    long long last_total_response_time_ms;
+    int last_response_count;
+    
     sem_t semaphore;
 } server_stats_t;
 

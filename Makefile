@@ -10,7 +10,8 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/stats.c \
        $(SRC_DIR)/http.c \
        $(SRC_DIR)/thread_pool.c \
-       $(SRC_DIR)/server.c
+       $(SRC_DIR)/server.c \
+       $(SRC_DIR)/file_cache.c
 
 # Object files
 OBJ_DIR = obj

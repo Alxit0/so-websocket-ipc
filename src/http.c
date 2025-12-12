@@ -6,6 +6,7 @@
 #include "stats.h"
 #include "logger.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
@@ -83,8 +84,38 @@ int parse_http_request(const char* buffer, http_request_t* req) {
 // ============================================================================
 // Send File with sendfile() optimization
 // ============================================================================
-void send_file_response(int client_fd, const char* full_path, const char* method) {
-    // Open file
+void send_file_response(int client_fd, const char* full_path, const char* method, file_cache_t* cache) {
+    // Try to get file from cache first
+    if (cache) {
+        const char* cached_content = NULL;
+        size_t cached_size = 0;
+        
+        if (file_cache_get(cache, full_path, &cached_content, &cached_size) == 0) {
+            // Cache hit! Send cached content
+            const char* mime = get_mime_type(full_path);
+            char header[512];
+            int header_len = snprintf(header, sizeof(header),
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: %s\r\n"
+                "Content-Length: %zu\r\n"
+                "Server: TemplateHTTP/1.0\r\n"
+                "X-Cache: HIT\r\n"
+                "Connection: close\r\n"
+                "\r\n", mime, cached_size);
+            
+            send(client_fd, header, header_len, 0);
+            
+            // Send file content (skip for HEAD requests)
+            if (strcmp(method, "HEAD") != 0) {
+                send(client_fd, cached_content, cached_size, 0);
+            }
+            
+            update_stats_with_code(cached_size, 200);
+            return;
+        }
+    }
+    
+    // Cache miss - open file
     FILE* file = fopen(full_path, "rb");
     if (!file) {
         const char* body = "<h1>404 Not Found</h1>";
@@ -115,6 +146,29 @@ void send_file_response(int client_fd, const char* full_path, const char* method
 
     const char* mime = get_mime_type(full_path);
     long file_size = st.st_size;
+    
+    // Check if file is cacheable (< 1MB) and cache is available
+    int is_cacheable = (cache && file_size > 0 && file_size < MAX_FILE_SIZE);
+    char* file_content = NULL;
+    
+    if (is_cacheable) {
+        // Read file into memory for caching
+        file_content = malloc(file_size);
+        if (file_content) {
+            size_t bytes_read = fread(file_content, 1, file_size, file);
+            if (bytes_read == (size_t)file_size) {
+                // Successfully read - add to cache
+                file_cache_put(cache, full_path, file_content, file_size);
+            } else {
+                // Read failed - free buffer and fall back to sendfile
+                free(file_content);
+                file_content = NULL;
+                is_cacheable = 0;
+            }
+        } else {
+            is_cacheable = 0;
+        }
+    }
 
     // Send headers
     char header[512];
@@ -123,6 +177,7 @@ void send_file_response(int client_fd, const char* full_path, const char* method
         "Content-Type: %s\r\n"
         "Content-Length: %ld\r\n"
         "Server: TemplateHTTP/1.0\r\n"
+        "X-Cache: MISS\r\n"
         "Connection: close\r\n"
         "\r\n", mime, file_size);
     
@@ -130,13 +185,25 @@ void send_file_response(int client_fd, const char* full_path, const char* method
 
     // Send file content (skip for HEAD requests)
     if (strcmp(method, "HEAD") != 0) {
-        off_t offset = 0;
-        while (offset < file_size) {
-            ssize_t sent = sendfile(client_fd, fd, &offset, file_size - offset);
-            if (sent <= 0) {
-                if (errno == EINTR) continue;
-                break;
+        if (is_cacheable && file_content) {
+            // Send from cached buffer
+            send(client_fd, file_content, file_size, 0);
+            free(file_content);
+        } else {
+            // Use sendfile for large files or when cache is not available
+            off_t offset = 0;
+            while (offset < file_size) {
+                ssize_t sent = sendfile(client_fd, fd, &offset, file_size - offset);
+                if (sent <= 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
             }
+        }
+    } else {
+        // HEAD request - free buffer if allocated
+        if (file_content) {
+            free(file_content);
         }
     }
 
@@ -147,7 +214,7 @@ void send_file_response(int client_fd, const char* full_path, const char* method
 // ============================================================================
 // Handle Client Connection
 // ============================================================================
-void handle_client_connection(int client_fd, const server_config_t* config) {
+void handle_client_connection(int client_fd, const server_config_t* config, file_cache_t* cache) {
     increment_active_connections();
     
     struct timespec start_time, end_time;
@@ -241,7 +308,7 @@ void handle_client_connection(int client_fd, const server_config_t* config) {
     log_message("Request: %s %s -> %s", req.method, req.path, full_path);
 
     // Serve the file
-    send_file_response(client_fd, full_path, req.method);
+    send_file_response(client_fd, full_path, req.method, cache);
 
     close(client_fd);
     

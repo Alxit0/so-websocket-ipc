@@ -28,6 +28,8 @@ int init_stats(void) {
     global_stats->active_connections = 0;
     global_stats->total_response_time_ms = 0;
     global_stats->response_count = 0;
+    global_stats->last_total_response_time_ms = 0;
+    global_stats->last_response_count = 0;
     sem_init(&global_stats->semaphore, 1, 1);  // 1 = compartilhado entre processos
     return 0;
 }
@@ -185,9 +187,18 @@ char* generate_metrics_response(size_t* response_len) {
     
     sem_wait(&global_stats->semaphore);
     
+    // Calculate overall average response time
     long long avg_response_time = 0;
     if (global_stats->response_count > 0) {
         avg_response_time = global_stats->total_response_time_ms / global_stats->response_count;
+    }
+    
+    // Calculate response time since last metrics call
+    long long avg_response_time_since_last = 0;
+    int requests_since_last = global_stats->response_count - global_stats->last_response_count;
+    if (requests_since_last > 0) {
+        long long time_since_last = global_stats->total_response_time_ms - global_stats->last_total_response_time_ms;
+        avg_response_time_since_last = time_since_last / requests_since_last;
     }
     
     *response_len = snprintf(response, sizeof(response),
@@ -209,16 +220,25 @@ char* generate_metrics_response(size_t* response_len) {
         "# TYPE http_connections_active gauge\n"
         "http_connections_active %d\n"
         "\n"
-        "# HELP http_response_time_milliseconds_avg Average response time in milliseconds\n"
+        "# HELP http_response_time_milliseconds_avg Average response time in milliseconds (all time)\n"
         "# TYPE http_response_time_milliseconds_avg gauge\n"
-        "http_response_time_milliseconds_avg %lld\n",
+        "http_response_time_milliseconds_avg %lld\n"
+        "\n"
+        "# HELP http_response_time_milliseconds_since_last Average response time since last /metrics call\n"
+        "# TYPE http_response_time_milliseconds_since_last gauge\n"
+        "http_response_time_milliseconds_since_last %lld\n",
         global_stats->total_requests,
         global_stats->bytes_sent,
         global_stats->http_200_count,
         global_stats->http_404_count,
         global_stats->http_500_count,
         global_stats->active_connections,
-        avg_response_time);
+        avg_response_time,
+        avg_response_time_since_last);
+    
+    // Update last snapshot for next call
+    global_stats->last_total_response_time_ms = global_stats->total_response_time_ms;
+    global_stats->last_response_count = global_stats->response_count;
     
     sem_post(&global_stats->semaphore);
     return response;

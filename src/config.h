@@ -9,6 +9,7 @@ typedef struct {
     char document_root[256];
     int num_workers;
     int timeout_seconds;
+    int cache_size_mb;
 } server_config_t;
 
 // ============================================================================
