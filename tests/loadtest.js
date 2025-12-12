@@ -16,6 +16,7 @@ export default function () {
     // You can add multiple files for more realistic tests
     const responses = http.batch([
         ['GET', url],
+		['GET', 'http://localhost:8080/index42.html'], // 404 test
         ['GET', 'http://localhost:8080/style.css'],
         ['GET', 'http://localhost:8080/script.js'],
         ['GET', 'http://localhost:8080/image.jpg'],

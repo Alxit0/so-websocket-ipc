@@ -131,13 +131,20 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
     log_message("Worker %d started (PID: %d) with %d threads", 
                worker_id, getpid(), THREADS_PER_WORKER);
 
-    // Initialize file cache for this worker
+    // Initialize file cache for this worker (if enabled)
     file_cache_t cache;
-    if (file_cache_init(&cache, config->cache_size_mb) != 0) {
-        log_message("Worker %d: Failed to initialize file cache", worker_id);
-        return;
+    file_cache_t* cache_ptr = NULL;
+    
+    if (config->cache_size_mb > 0) {
+        if (file_cache_init(&cache, config->cache_size_mb) != 0) {
+            log_message("Worker %d: Failed to initialize file cache", worker_id);
+            return;
+        }
+        cache_ptr = &cache;
+        log_message("Worker %d: File cache initialized (%d MB)", worker_id, config->cache_size_mb);
+    } else {
+        log_message("Worker %d: File caching disabled (CACHE_SIZE_MB=0)", worker_id);
     }
-    log_message("Worker %d: File cache initialized (%d MB)", worker_id, config->cache_size_mb);
 
     // Inicializar fila de trabalho
     work_queue_t queue;
@@ -152,7 +159,7 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
         ctx->worker_id = worker_id;
         ctx->thread_id = i;
         ctx->config = config;
-        ctx->cache = &cache;
+        ctx->cache = cache_ptr;
         
         if (pthread_create(&threads[i], NULL, thread_worker, ctx) != 0) {
             log_message("Worker %d: Failed to create thread %d", worker_id, i);
@@ -190,15 +197,17 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
     
     work_queue_destroy(&queue);
     
-    // Print cache statistics before destroying
-    int entries;
-    size_t total_size;
-    file_cache_stats(&cache, &entries, &total_size);
-    log_message("Worker %d: Final cache stats - %d entries, %zu bytes", 
-                worker_id, entries, total_size);
-    
-    // Destroy file cache
-    file_cache_destroy(&cache);
+    // Print cache statistics before destroying (if cache was enabled)
+    if (cache_ptr) {
+        int entries;
+        size_t total_size;
+        file_cache_stats(&cache, &entries, &total_size);
+        log_message("Worker %d: Final cache stats - %d entries, %zu bytes", 
+                    worker_id, entries, total_size);
+        
+        // Destroy file cache
+        file_cache_destroy(&cache);
+    }
     
     log_message("Worker %d exiting (all threads terminated)", worker_id);
 }
