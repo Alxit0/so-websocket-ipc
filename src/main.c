@@ -1,6 +1,7 @@
-// src/main_v2.c
-// Prefork HTTP server with template-based structure
-// Compile: gcc -o server main_v2.c config.c -Wall -Wextra -pthread -lrt
+// src/main.c
+// Prefork HTTP server with shared memory statistics
+// Compile: gcc -o server main.c -Wall -Wextra -pthread -lrt
+// Run: ./server [config_file]
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -13,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>   // <-- ADICIONADO para shared memory
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -56,7 +58,7 @@ typedef struct {
     sem_t semaphore;  // Semáforo para proteção
 } server_stats_t;
 
-server_stats_t global_stats;  // Variável global para estatísticas
+server_stats_t* global_stats = NULL;  // Ponteiro para shared memory
 
 static volatile sig_atomic_t keep_running = 1;
 
@@ -134,18 +136,20 @@ void log_message(const char* format, ...) {
 // Update Statistics Function (NEW - para estatísticas com semáforo)
 // ============================================================================
 void update_stats(int bytes) {
-    sem_wait(&global_stats.semaphore);  // Proteger com semáforo
+    if (!global_stats) return;  // Verificar se está inicializado
     
-    global_stats.total_requests++;
-    global_stats.bytes_sent += bytes;
+    sem_wait(&global_stats->semaphore);  // Proteger com semáforo
+    
+    global_stats->total_requests++;
+    global_stats->bytes_sent += bytes;
     
     // Mostrar estatísticas a cada 15 pedidos
-    if (global_stats.total_requests % 15 == 0) {
+    if (global_stats->total_requests % 15 == 0) {
         log_message("STATS: Requests=%d, Bytes=%d", 
-                   global_stats.total_requests, global_stats.bytes_sent);
+                   global_stats->total_requests, global_stats->bytes_sent);
     }
     
-    sem_post(&global_stats.semaphore);  // Liberar semáforo
+    sem_post(&global_stats->semaphore);  // Liberar semáforo
 }
 
 // ============================================================================
@@ -425,10 +429,17 @@ int main(int argc, char** argv) {
     server_config_t config;
     load_config(config_file, &config);
 
-    // Initialize statistics with semaphore (NEW)
-    global_stats.total_requests = 0;
-    global_stats.bytes_sent = 0;
-    sem_init(&global_stats.semaphore, 0, 1);
+    // Initialize statistics with shared memory (NEW)
+    global_stats = mmap(NULL, sizeof(server_stats_t), 
+                       PROT_READ | PROT_WRITE, 
+                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (global_stats == MAP_FAILED) {
+        perror("mmap failed for statistics");
+        exit(EXIT_FAILURE);
+    }
+    global_stats->total_requests = 0;
+    global_stats->bytes_sent = 0;
+    sem_init(&global_stats->semaphore, 1, 1);  // 1 = compartilhado entre processos
 
     // Setup signal handlers
     signal(SIGINT, signal_handler);
@@ -477,12 +488,14 @@ int main(int argc, char** argv) {
         counter++;
         if (counter >= 30) {
             counter = 0;
-            sem_wait(&global_stats.semaphore);
-            log_message("=== GLOBAL STATISTICS ===");
-            log_message("Total requests: %d", global_stats.total_requests);
-            log_message("Total bytes sent: %d", global_stats.bytes_sent);
-            log_message("=========================");
-            sem_post(&global_stats.semaphore);
+            if (global_stats) {
+                sem_wait(&global_stats->semaphore);
+                log_message("=== GLOBAL STATISTICS ===");
+                log_message("Total requests: %d", global_stats->total_requests);
+                log_message("Total bytes sent: %d", global_stats->bytes_sent);
+                log_message("=========================");
+                sem_post(&global_stats->semaphore);
+            }
         }
         
         // Reap any dead children
@@ -511,8 +524,12 @@ int main(int argc, char** argv) {
     close(server_fd);
     free(worker_pids);
     
-    // Cleanup semaphore (NEW)
-    sem_destroy(&global_stats.semaphore);
+    // Cleanup shared memory and semaphore (NEW)
+    if (global_stats) {
+        sem_destroy(&global_stats->semaphore);
+        munmap(global_stats, sizeof(server_stats_t));
+        global_stats = NULL;
+    }
     
     log_message("Shutdown complete");
     return EXIT_SUCCESS;

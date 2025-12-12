@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -pthread -lrt -O2
-SRC = src/main_v2.c
+SRC = src/main.c
 BIN = concurrent-http-server
 
 .PHONY: all clean run
