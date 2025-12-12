@@ -1,4 +1,3 @@
-// src/server.c
 // Server socket and worker process implementation
 
 #define _GNU_SOURCE

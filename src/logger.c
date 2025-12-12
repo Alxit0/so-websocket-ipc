@@ -1,4 +1,3 @@
-// src/logger.c
 // Thread-safe logging functions
 
 #include "logger.h"

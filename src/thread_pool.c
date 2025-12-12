@@ -1,4 +1,3 @@
-// src/thread_pool.c
 // Thread pool implementation for connection queue
 
 #include "thread_pool.h"

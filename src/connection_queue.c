@@ -1,5 +1,4 @@
-// src/connection_queue.c
-// Producer-Consumer connection queue with semaphores
+// producer-Consumer connection queue with semaphores
 
 #include "connection_queue.h"
 #include "logger.h"
@@ -16,15 +15,14 @@ int connection_queue_init(connection_queue_t* queue) {
         return -1;
     }
     
-    // Initialize circular buffer indices
+    // init circular buffer indices
     queue->head = 0;
     queue->tail = 0;
     queue->shutdown = 0;
     
-    // Initialize all connections to -1 (invalid fd)
     memset(queue->connections, -1, sizeof(queue->connections));
     
-    // Initialize semaphores
+    // init semaphores
     // empty_slots: initially QUEUE_SIZE (all slots are empty)
     if (sem_init(&queue->empty_slots, 0, QUEUE_SIZE) != 0) {
         log_message("Failed to initialize empty_slots semaphore: %s", strerror(errno));
@@ -95,11 +93,11 @@ int connection_queue_try_enqueue(connection_queue_t* queue, int client_fd) {
     
     // Try to acquire an empty slot without blocking
     if (sem_trywait(&queue->empty_slots) != 0) {
-        // Queue is full
+        // queue is full
         return -1;
     }
     
-    // Check if shutdown was signaled
+    // need to check if shutdown was signaled
     if (queue->shutdown) {
         sem_post(&queue->empty_slots);  // Release the slot
         return -1;
@@ -158,7 +156,7 @@ int connection_queue_dequeue(connection_queue_t* queue) {
 }
 
 // ============================================================================
-// Get Queue Size (for monitoring)
+// Get Queue Size
 // ============================================================================
 int connection_queue_size(connection_queue_t* queue) {
     if (!queue) {

@@ -1,4 +1,3 @@
-// src/file_cache.c
 // LRU File Cache Implementation for Worker Processes
 
 #include "file_cache.h"

@@ -1,4 +1,3 @@
-// src/http.c
 // HTTP request/response handling
 
 #define _GNU_SOURCE

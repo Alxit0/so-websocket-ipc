@@ -12,16 +12,16 @@
 // Connection Queue Structure
 // ============================================================================
 typedef struct {
-    int connections[QUEUE_SIZE];  // Circular buffer for connection file descriptors
-    int head;                      // Index for dequeue (consumer)
-    int tail;                      // Index for enqueue (producer)
+    int connections[QUEUE_SIZE];
+    int head;
+    int tail;
     
     // Semaphores for synchronization
-    sem_t empty_slots;            // Counts empty slots (producer waits on this)
-    sem_t filled_slots;           // Counts filled slots (consumer waits on this)
-    sem_t mutex;                  // Mutual exclusion for critical section
+    sem_t empty_slots;
+    sem_t filled_slots;
+    sem_t mutex;
     
-    int shutdown;                 // Shutdown flag
+    int shutdown;
 } connection_queue_t;
 
 // ============================================================================

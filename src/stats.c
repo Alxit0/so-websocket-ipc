@@ -1,4 +1,3 @@
-// src/stats.c
 // Shared memory statistics management
 
 #include "stats.h"

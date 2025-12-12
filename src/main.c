@@ -1,4 +1,3 @@
-// src/main.c
 // Prefork HTTP server with shared memory statistics
 // Compile: gcc -o server main.c config.c logger.c stats.c http.c thread_pool.c server.c -Wall -Wextra -pthread -lrt
 // Run: ./server [config_file]

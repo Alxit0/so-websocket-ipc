@@ -1,5 +1,5 @@
-// src/config.c
 // Configuration loading from file
+// base code from templates provided by university
 
 #include "config.h"
 #include <stdio.h>
@@ -26,11 +26,10 @@ int load_config(const char* filename, server_config_t* config) {
 
     char line[512], key[128], value[256];
     while (fgets(line, sizeof(line), fp)) {
-        // Skip comments and empty lines
         if (line[0] == '#' || line[0] == '\n') continue;
 
         if (sscanf(line, "%[^=]=%s", key, value) == 2) {
-            // Trim whitespace from key
+            // trim whitespace from key
             char* k = key;
             while (*k == ' ' || *k == '\t') k++;
             char* k_end = k + strlen(k) - 1;
@@ -39,7 +38,7 @@ int load_config(const char* filename, server_config_t* config) {
                 k_end--;
             }
 
-            // Trim whitespace from value
+            // trim whitespace from value
             char* v = value;
             while (*v == ' ' || *v == '\t') v++;
             char* v_end = v + strlen(v) - 1;
