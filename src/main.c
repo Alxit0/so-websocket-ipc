@@ -60,6 +60,23 @@ typedef struct {
 
 server_stats_t* global_stats = NULL;  // Ponteiro para shared memory
 
+// ============================================================================
+// Thread Pool Structures
+// ============================================================================
+typedef struct work_item {
+    int client_fd;
+    struct work_item* next;
+} work_item_t;
+
+typedef struct {
+    work_item_t* head;
+    work_item_t* tail;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int shutdown;
+    int active_threads;
+} work_queue_t;
+
 static volatile sig_atomic_t keep_running = 1;
 
 // ============================================================================
@@ -389,11 +406,161 @@ int create_server_socket(int port) {
 }
 
 // ============================================================================
-// Worker Process Loop
+// Work Queue Functions
+// ============================================================================
+void work_queue_init(work_queue_t* queue) {
+    queue->head = NULL;
+    queue->tail = NULL;
+    queue->shutdown = 0;
+    queue->active_threads = 0;
+    pthread_mutex_init(&queue->mutex, NULL);
+    pthread_cond_init(&queue->cond, NULL);
+}
+
+void work_queue_push(work_queue_t* queue, int client_fd) {
+    work_item_t* item = malloc(sizeof(work_item_t));
+    item->client_fd = client_fd;
+    item->next = NULL;
+
+    pthread_mutex_lock(&queue->mutex);
+    
+    if (queue->tail) {
+        queue->tail->next = item;
+    } else {
+        queue->head = item;
+    }
+    queue->tail = item;
+    
+    pthread_cond_signal(&queue->cond);  // Acordar uma thread
+    pthread_mutex_unlock(&queue->mutex);
+}
+
+int work_queue_pop(work_queue_t* queue) {
+    pthread_mutex_lock(&queue->mutex);
+    
+    // Bloquear enquanto não houver trabalho e não for shutdown
+    while (!queue->head && !queue->shutdown) {
+        pthread_cond_wait(&queue->cond, &queue->mutex);
+    }
+    
+    // Se for shutdown e não houver trabalho, retornar -1
+    if (queue->shutdown && !queue->head) {
+        pthread_mutex_unlock(&queue->mutex);
+        return -1;
+    }
+    
+    work_item_t* item = queue->head;
+    int client_fd = item->client_fd;
+    queue->head = item->next;
+    
+    if (!queue->head) {
+        queue->tail = NULL;
+    }
+    
+    pthread_mutex_unlock(&queue->mutex);
+    free(item);
+    
+    return client_fd;
+}
+
+void work_queue_shutdown(work_queue_t* queue) {
+    pthread_mutex_lock(&queue->mutex);
+    queue->shutdown = 1;
+    pthread_cond_broadcast(&queue->cond);  // Acordar todas as threads
+    pthread_mutex_unlock(&queue->mutex);
+}
+
+void work_queue_destroy(work_queue_t* queue) {
+    // Limpar itens pendentes
+    while (queue->head) {
+        work_item_t* item = queue->head;
+        queue->head = item->next;
+        close(item->client_fd);
+        free(item);
+    }
+    
+    pthread_mutex_destroy(&queue->mutex);
+    pthread_cond_destroy(&queue->cond);
+}
+
+// ============================================================================
+// Thread Pool Worker Function
+// ============================================================================
+typedef struct {
+    work_queue_t* queue;
+    int worker_id;
+    int thread_id;
+    const server_config_t* config;
+} thread_context_t;
+
+void* thread_worker(void* arg) {
+    thread_context_t* ctx = (thread_context_t*)arg;
+    
+    log_message("Worker %d: Thread %d started (TID: %lu)", 
+               ctx->worker_id, ctx->thread_id, (unsigned long)pthread_self());
+    
+    pthread_mutex_lock(&ctx->queue->mutex);
+    ctx->queue->active_threads++;
+    pthread_mutex_unlock(&ctx->queue->mutex);
+    
+    while (1) {
+        int client_fd = work_queue_pop(ctx->queue);
+        
+        if (client_fd < 0) {
+            // Shutdown signal
+            break;
+        }
+        
+        // Set socket timeouts
+        struct timeval tv;
+        tv.tv_sec = ctx->config->timeout_seconds;
+        tv.tv_usec = 0;
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        
+        // Handle the connection
+        handle_client_connection(client_fd, ctx->config);
+    }
+    
+    pthread_mutex_lock(&ctx->queue->mutex);
+    ctx->queue->active_threads--;
+    pthread_mutex_unlock(&ctx->queue->mutex);
+    
+    log_message("Worker %d: Thread %d exiting", ctx->worker_id, ctx->thread_id);
+    free(ctx);
+    return NULL;
+}
+
+// ============================================================================
+// Worker Process Loop (com Thread Pool)
 // ============================================================================
 void worker_process(int server_fd, int worker_id, const server_config_t* config) {
-    log_message("Worker %d started (PID: %d)", worker_id, getpid());
+    log_message("Worker %d started (PID: %d) with %d threads", 
+               worker_id, getpid(), THREADS_PER_WORKER);
 
+    // Inicializar fila de trabalho
+    work_queue_t queue;
+    work_queue_init(&queue);
+    
+    // Criar thread pool
+    pthread_t threads[THREADS_PER_WORKER];
+    
+    for (int i = 0; i < THREADS_PER_WORKER; i++) {
+        thread_context_t* ctx = malloc(sizeof(thread_context_t));
+        ctx->queue = &queue;
+        ctx->worker_id = worker_id;
+        ctx->thread_id = i;
+        ctx->config = config;
+        
+        if (pthread_create(&threads[i], NULL, thread_worker, ctx) != 0) {
+            log_message("Worker %d: Failed to create thread %d", worker_id, i);
+            free(ctx);
+        }
+    }
+    
+    log_message("Worker %d: Thread pool initialized", worker_id);
+
+    // Loop principal: aceitar conexões e distribuir para threads
     while (keep_running) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
@@ -406,18 +573,21 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
             continue;
         }
 
-        // Set socket timeouts
-        struct timeval tv;
-        tv.tv_sec = config->timeout_seconds;
-        tv.tv_usec = 0;
-        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-        // Handle the connection
-        handle_client_connection(client_fd, config);
+        // Adicionar trabalho à fila (threads vão processar)
+        work_queue_push(&queue, client_fd);
     }
 
-    log_message("Worker %d exiting", worker_id);
+    // Shutdown gracioso do thread pool
+    log_message("Worker %d: Initiating graceful shutdown", worker_id);
+    work_queue_shutdown(&queue);
+    
+    // Aguardar todas as threads terminarem
+    for (int i = 0; i < THREADS_PER_WORKER; i++) {
+        pthread_join(threads[i], NULL);
+    }
+    
+    work_queue_destroy(&queue);
+    log_message("Worker %d exiting (all threads terminated)", worker_id);
 }
 
 // ============================================================================
