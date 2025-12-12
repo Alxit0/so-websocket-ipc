@@ -1,0 +1,7 @@
+services:
+  k6:
+    image: grafana/k6
+    volumes:
+      - ./stress.js:/stress.js
+    network_mode: host   # Important: use host network
+    entrypoint: ["k6", "run", "/stress.js"]

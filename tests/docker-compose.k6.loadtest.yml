@@ -1,0 +1,7 @@
+services:
+  k6:
+    image: grafana/k6
+    volumes:
+      - ./loadtest.js:/loadtest.js
+    network_mode: host   # Important: use host network
+    entrypoint: ["k6", "run", "/loadtest.js"]

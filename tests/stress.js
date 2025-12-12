@@ -4,7 +4,8 @@ import { check } from 'k6';
 export let options = {
   stages: [
     { duration: '20s', target: 50 },   // ramp up
-    { duration: '40s', target: 200 },  // peak load
+    { duration: '40s', target: 200 },  // med load
+    { duration: '10s', target: 500 },  // peak load
     { duration: '20s', target: 0 },    // ramp down
   ]
 };

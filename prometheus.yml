@@ -1,0 +1,13 @@
+# Prometheus configuration for monitoring the HTTP server
+# Usage: prometheus --config.file=prometheus.yml
+
+global:
+  scrape_interval: 15s      # How frequently to scrape targets
+  evaluation_interval: 15s  # How frequently to evaluate rules
+
+scrape_configs:
+  - job_name: 'http-server'
+    static_configs:
+      - targets: ['localhost:8080']  # Replace with your server address
+    metrics_path: '/metrics'           # The metrics endpoint
+    scrape_interval: 5s               # Override global interval if needed
