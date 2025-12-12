@@ -38,4 +38,9 @@ void add_response_time(long long time_ms);
 void print_global_stats(void);
 server_stats_t* get_stats(void);
 
+// Monitoring endpoints
+char* generate_health_response(size_t* response_len);
+char* generate_metrics_response(size_t* response_len);
+char* generate_stats_json_response(size_t* response_len);
+
 #endif // STATS_H

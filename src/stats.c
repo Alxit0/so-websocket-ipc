@@ -160,3 +160,113 @@ void add_response_time(long long time_ms) {
 server_stats_t* get_stats(void) {
     return global_stats;
 }
+
+// ============================================================================
+// Generate Health Endpoint Response
+// ============================================================================
+char* generate_health_response(size_t* response_len) {
+    static char response[256];
+    *response_len = snprintf(response, sizeof(response),
+        "{\"status\":\"healthy\",\"service\":\"http-server\",\"active_connections\":%d}",
+        global_stats ? global_stats->active_connections : 0);
+    return response;
+}
+
+// ============================================================================
+// Generate Prometheus Metrics Response
+// ============================================================================
+char* generate_metrics_response(size_t* response_len) {
+    static char response[4096];
+    
+    if (!global_stats) {
+        *response_len = snprintf(response, sizeof(response), "# No stats available\n");
+        return response;
+    }
+    
+    sem_wait(&global_stats->semaphore);
+    
+    long long avg_response_time = 0;
+    if (global_stats->response_count > 0) {
+        avg_response_time = global_stats->total_response_time_ms / global_stats->response_count;
+    }
+    
+    *response_len = snprintf(response, sizeof(response),
+        "# HELP http_requests_total Total number of HTTP requests\n"
+        "# TYPE http_requests_total counter\n"
+        "http_requests_total %d\n"
+        "\n"
+        "# HELP http_requests_bytes_sent_total Total bytes sent in HTTP responses\n"
+        "# TYPE http_requests_bytes_sent_total counter\n"
+        "http_requests_bytes_sent_total %d\n"
+        "\n"
+        "# HELP http_responses_total Total HTTP responses by status code\n"
+        "# TYPE http_responses_total counter\n"
+        "http_responses_total{code=\"200\"} %d\n"
+        "http_responses_total{code=\"404\"} %d\n"
+        "http_responses_total{code=\"5xx\"} %d\n"
+        "\n"
+        "# HELP http_connections_active Current number of active connections\n"
+        "# TYPE http_connections_active gauge\n"
+        "http_connections_active %d\n"
+        "\n"
+        "# HELP http_response_time_milliseconds_avg Average response time in milliseconds\n"
+        "# TYPE http_response_time_milliseconds_avg gauge\n"
+        "http_response_time_milliseconds_avg %lld\n",
+        global_stats->total_requests,
+        global_stats->bytes_sent,
+        global_stats->http_200_count,
+        global_stats->http_404_count,
+        global_stats->http_500_count,
+        global_stats->active_connections,
+        avg_response_time);
+    
+    sem_post(&global_stats->semaphore);
+    return response;
+}
+
+// ============================================================================
+// Generate JSON Stats Response
+// ============================================================================
+char* generate_stats_json_response(size_t* response_len) {
+    static char response[2048];
+    
+    if (!global_stats) {
+        *response_len = snprintf(response, sizeof(response), 
+            "{\"error\":\"Statistics not available\"}");
+        return response;
+    }
+    
+    sem_wait(&global_stats->semaphore);
+    
+    long long avg_response_time = 0;
+    if (global_stats->response_count > 0) {
+        avg_response_time = global_stats->total_response_time_ms / global_stats->response_count;
+    }
+    
+    *response_len = snprintf(response, sizeof(response),
+        "{\n"
+        "  \"total_requests\": %d,\n"
+        "  \"bytes_sent\": %d,\n"
+        "  \"http_status_codes\": {\n"
+        "    \"200\": %d,\n"
+        "    \"404\": %d,\n"
+        "    \"5xx\": %d\n"
+        "  },\n"
+        "  \"active_connections\": %d,\n"
+        "  \"average_response_time_ms\": %lld,\n"
+        "  \"total_response_time_ms\": %lld,\n"
+        "  \"response_count\": %d\n"
+        "}",
+        global_stats->total_requests,
+        global_stats->bytes_sent,
+        global_stats->http_200_count,
+        global_stats->http_404_count,
+        global_stats->http_500_count,
+        global_stats->active_connections,
+        avg_response_time,
+        global_stats->total_response_time_ms,
+        global_stats->response_count);
+    
+    sem_post(&global_stats->semaphore);
+    return response;
+}

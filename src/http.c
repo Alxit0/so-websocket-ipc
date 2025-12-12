@@ -183,6 +183,37 @@ void handle_client_connection(int client_fd, const server_config_t* config) {
         return;
     }
 
+    // Handle monitoring endpoints
+    if (strcmp(req.path, "/health") == 0) {
+        size_t response_len;
+        char* body = generate_health_response(&response_len);
+        send_http_response(client_fd, 200, "OK", "application/json", body, response_len);
+        update_stats_with_code(response_len, 200);
+        close(client_fd);
+        decrement_active_connections();
+        return;
+    }
+    
+    if (strcmp(req.path, "/metrics") == 0) {
+        size_t response_len;
+        char* body = generate_metrics_response(&response_len);
+        send_http_response(client_fd, 200, "OK", "text/plain; version=0.0.4", body, response_len);
+        update_stats_with_code(response_len, 200);
+        close(client_fd);
+        decrement_active_connections();
+        return;
+    }
+    
+    if (strcmp(req.path, "/stats") == 0) {
+        size_t response_len;
+        char* body = generate_stats_json_response(&response_len);
+        send_http_response(client_fd, 200, "OK", "application/json", body, response_len);
+        update_stats_with_code(response_len, 200);
+        close(client_fd);
+        decrement_active_connections();
+        return;
+    }
+    
     // Sanitize path
     char rel_path[MAX_PATH];
     if (strcmp(req.path, "/") == 0) {

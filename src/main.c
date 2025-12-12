@@ -32,9 +32,16 @@ int main(int argc, char** argv) {
     server_config_t config;
     load_config(config_file, &config);
 
+    // Initialize logger
+    if (logger_init("server.log") < 0) {
+        fprintf(stderr, "Failed to initialize logger\n");
+        exit(EXIT_FAILURE);
+    }
+
     // Initialize statistics with shared memory
     if (init_stats() < 0) {
         fprintf(stderr, "Failed to initialize statistics\n");
+        logger_cleanup();
         exit(EXIT_FAILURE);
     }
 
@@ -118,5 +125,9 @@ int main(int argc, char** argv) {
     cleanup_stats();
     
     log_message("Shutdown complete");
+    
+    // Cleanup logger
+    logger_cleanup();
+    
     return EXIT_SUCCESS;
 }
