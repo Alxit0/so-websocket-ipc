@@ -5,12 +5,14 @@
 #include "server.h"
 #include "http.h"
 #include "logger.h"
+#include "stats.h"
 #include "thread_pool.h"
 #include "connection_queue.h"
 #include "file_cache.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
@@ -136,6 +138,122 @@ void send_503_response(int client_fd) {
 }
 
 // ============================================================================
+// Check if request is for a priority endpoint (metrics, health, stats)
+// ============================================================================
+int is_priority_endpoint(int client_fd) {
+    char buffer[512];
+    
+    // Peek at the request without consuming it
+    ssize_t bytes = recv(client_fd, buffer, sizeof(buffer) - 1, MSG_PEEK);
+    if (bytes <= 0) {
+        return 0;
+    }
+    
+    buffer[bytes] = '\0';
+    
+    // Check if it's a GET/HEAD request for priority endpoints
+    if (strstr(buffer, "GET /metrics") == buffer || 
+        strstr(buffer, "HEAD /metrics") == buffer ||
+        strstr(buffer, "GET /health") == buffer || 
+        strstr(buffer, "HEAD /health") == buffer ||
+        strstr(buffer, "GET /stats") == buffer || 
+        strstr(buffer, "HEAD /stats") == buffer) {
+        return 1;
+    }
+    
+    return 0;
+}
+
+// ============================================================================
+// Handle priority endpoints immediately (bypass queue)
+// ============================================================================
+void handle_priority_endpoint(int client_fd) {
+    char buffer[512];
+    ssize_t bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+    
+    if (bytes <= 0) {
+        close(client_fd);
+        return;
+    }
+    
+    buffer[bytes] = '\0';
+    
+    // Quick parse - just get the path
+    char method[16], path[256];
+    if (sscanf(buffer, "%15s %255s", method, path) != 2) {
+        close(client_fd);
+        return;
+    }
+    
+    // Handle each priority endpoint
+    if (strcmp(path, "/metrics") == 0 || strcmp(path, "/metrics/") == 0) {
+        size_t response_len;
+        char* body = generate_metrics_response(&response_len);
+        
+        char header[256];
+        int header_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain; version=0.0.4\r\n"
+            "Content-Length: %zu\r\n"
+            "X-Priority: high\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            response_len);
+        
+        send(client_fd, header, header_len, 0);
+        if (strcmp(method, "GET") == 0) {
+            send(client_fd, body, response_len, 0);
+        }
+        // Don't free - body is static buffer
+        update_stats_with_code(response_len, 200);
+    }
+    else if (strcmp(path, "/health") == 0 || strcmp(path, "/health/") == 0) {
+        size_t response_len;
+        char* body = generate_health_response(&response_len);
+        
+        char header[256];
+        int header_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %zu\r\n"
+            "X-Priority: high\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            response_len);
+        
+        send(client_fd, header, header_len, 0);
+        if (strcmp(method, "GET") == 0) {
+            send(client_fd, body, response_len, 0);
+        }
+        // Don't free - body is static buffer
+        update_stats_with_code(response_len, 200);
+    }
+    else if (strcmp(path, "/stats") == 0 || strcmp(path, "/stats/") == 0) {
+        size_t response_len;
+        char* body = generate_stats_json_response(&response_len);
+        
+        char header[256];
+        int header_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %zu\r\n"
+            "X-Priority: high\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            response_len);
+        
+        send(client_fd, header, header_len, 0);
+        if (strcmp(method, "GET") == 0) {
+            send(client_fd, body, response_len, 0);
+        }
+        // Don't free - body is static buffer
+        update_stats_with_code(response_len, 200);
+    }
+    
+    close(client_fd);
+}
+
+// ============================================================================
 // Worker Process Loop (com Thread Pool)
 // ============================================================================
 void worker_process(int server_fd, int worker_id, const server_config_t* config) {
@@ -202,6 +320,7 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
     // Producer: Accept connections and enqueue them
     unsigned long total_accepted = 0;
     unsigned long total_rejected = 0;
+    unsigned long priority_handled = 0;
     
     while (keep_running) {
         struct sockaddr_in client_addr;
@@ -216,6 +335,14 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
         }
 
         total_accepted++;
+        
+        // Check if this is a priority endpoint (metrics, health, stats)
+        // Priority endpoints bypass the queue and are handled immediately
+        if (is_priority_endpoint(client_fd)) {
+            priority_handled++;
+            handle_priority_endpoint(client_fd);
+            continue;
+        }
         
         // Try to enqueue connection (non-blocking)
         if (connection_queue_try_enqueue(&conn_queue, client_fd) != 0) {
@@ -232,8 +359,8 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
     }
 
     // Shutdown gracioso
-    log_message("Worker %d: Initiating graceful shutdown (accepted: %lu, rejected: %lu)", 
-                worker_id, total_accepted, total_rejected);
+    log_message("Worker %d: Initiating graceful shutdown (accepted: %lu, priority: %lu, rejected: %lu)", 
+                worker_id, total_accepted, priority_handled, total_rejected);
     
     connection_queue_shutdown(&conn_queue);
     
