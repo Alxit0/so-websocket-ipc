@@ -10,6 +10,7 @@ typedef struct {
     int num_workers;
     int timeout_seconds;
     int cache_size_mb;
+    int threads_per_worker;
 } server_config_t;
 
 // ============================================================================

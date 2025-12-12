@@ -19,7 +19,6 @@
 #include <arpa/inet.h>
 
 #define BACKLOG 128
-#define THREADS_PER_WORKER 10
 
 static volatile sig_atomic_t keep_running = 1;
 
@@ -129,7 +128,7 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
     signal(SIGINT, worker_signal_handler);
     
     log_message("Worker %d started (PID: %d) with %d threads", 
-               worker_id, getpid(), THREADS_PER_WORKER);
+               worker_id, getpid(), config->threads_per_worker);
 
     // Initialize file cache for this worker (if enabled)
     file_cache_t cache;
@@ -151,9 +150,14 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
     work_queue_init(&queue);
     
     // Criar thread pool
-    pthread_t threads[THREADS_PER_WORKER];
+    pthread_t* threads = malloc(sizeof(pthread_t) * config->threads_per_worker);
+    if (!threads) {
+        log_message("Worker %d: Failed to allocate thread array", worker_id);
+        if (cache_ptr) file_cache_destroy(cache_ptr);
+        return;
+    }
     
-    for (int i = 0; i < THREADS_PER_WORKER; i++) {
+    for (int i = 0; i < config->threads_per_worker; i++) {
         thread_context_t* ctx = malloc(sizeof(thread_context_t));
         ctx->queue = &queue;
         ctx->worker_id = worker_id;
@@ -191,10 +195,11 @@ void worker_process(int server_fd, int worker_id, const server_config_t* config)
     work_queue_shutdown(&queue);
     
     // Aguardar todas as threads terminarem
-    for (int i = 0; i < THREADS_PER_WORKER; i++) {
+    for (int i = 0; i < config->threads_per_worker; i++) {
         pthread_join(threads[i], NULL);
     }
     
+    free(threads);
     work_queue_destroy(&queue);
     
     // Print cache statistics before destroying (if cache was enabled)
